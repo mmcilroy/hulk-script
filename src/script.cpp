@@ -1,0 +1,180 @@
+
+extern "C"
+{
+#include <lua.h>
+#include <lauxlib.h>
+#include <lualib.h>
+}
+
+#include "hulk/core/tcp.h"
+#include "hulk/core/thread.h"
+#include "hulk/core/logger.h"
+#include "hulk/fix/tcp.h"
+
+#include <list>
+
+using namespace hulk;
+
+const char* INITIATOR_ID = "luaL_initiator";
+
+core::log& l = core::logger::instance().get( "hulk.script" );
+
+fix::tcp_event_loop io_loop;
+
+void print_fields( const fix::fields& f )
+{
+    for( int i=0; i<f.size(); i++ ) {
+        std::cout << f[i]._tag << " = " << f[i]._value << std::endl;
+    }
+}
+
+class io_thread : public core::thread
+{
+    virtual void run() {
+        while( 1 ) io_loop.loop( 1000 );
+    }
+};
+
+class scriptable_initiator : public fix::session
+{
+public:
+    scriptable_initiator( const fix::value& protocol, const fix::fields& header, fix::transport& tpt )
+    : session( protocol, header, tpt ) {}
+
+    virtual void recv( const fix::fields& msg )
+    {
+        core::lock_guard guard( _mutex );
+        _messages.push_back( msg );
+    }
+
+    bool recvd( fix::fields& msg )
+    {
+        core::lock_guard guard( _mutex );
+        if( _messages.size() )
+        {
+            msg = *_messages.begin();
+            _messages.pop_front();
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    core::mutex _mutex;
+    std::list< fix::fields > _messages;
+};
+
+void push_fix( lua_State* l, fix::fields& flds )
+{
+    lua_newtable( l );
+    for( int i=0; i<flds.size(); i++ )
+    {
+        std::string& str = flds[i]._value;
+        lua_pushinteger( l, flds[i]._tag );
+        lua_pushlstring( l, str.c_str(), str.size() );
+        lua_settable( l, -3 );
+    }
+}
+
+void pop_fix( lua_State* l, fix::fields& flds )
+{
+    lua_pushnil( l );
+    while( lua_next( l, -2 ) != 0 )
+    {
+        flds.push_back( fix::field( lua_tointeger( l, -2 ), lua_tostring( l, -1 ) ) );
+        lua_pop( l, 1 );
+    }
+}
+
+scriptable_initiator* l_check_initiator( lua_State* l, int n )
+{
+    return *(scriptable_initiator**)luaL_checkudata( l, n, INITIATOR_ID );
+}
+
+int l_new_initiator( lua_State* l )
+{
+    const char* transport_uri = luaL_checkstring( l, -3 );
+    const char* protocol = luaL_checkstring( l, -2 );
+    fix::fields header; pop_fix( l, header );
+
+    scriptable_initiator** udata = (scriptable_initiator**)lua_newuserdata( l, sizeof( scriptable_initiator* ) );
+    *udata = io_loop.new_initiator< scriptable_initiator >( "192.168.1.73", 9880, protocol, header );
+    luaL_getmetatable( l, INITIATOR_ID );
+    lua_setmetatable( l, -2 );
+
+    return 1;
+}
+
+int l_del_initiator( lua_State* l )
+{
+    scriptable_initiator* si = l_check_initiator( l, -3 );
+    delete si;
+
+    return 0;
+}
+
+int l_send( lua_State* l )
+{
+    scriptable_initiator* si = l_check_initiator( l, -3 );
+    const char* msg_type = luaL_checkstring( l, -2 );
+    fix::fields body; pop_fix( l, body );
+    si->send( msg_type, body );
+
+    return 0;
+}
+
+int l_recv( lua_State* l )
+{
+    scriptable_initiator* si = l_check_initiator( l, -1 );
+    fix::fields msg;
+
+    int i=0;
+    while( !si->recvd( msg ) && i < 100 ) {
+        core::sleep_ms( 50 ); ++i;
+    }
+
+    if( i < 100 ) {
+        push_fix( l, msg );
+    } else {
+        lua_pushnil( l );
+    }
+
+    return 1;
+}
+
+void l_register( lua_State* l )
+{
+    luaL_Reg regs[] =
+    {
+        { "new_initiator", l_new_initiator },
+        { "__gc", l_del_initiator },
+        { "send", l_send },
+        { "recv", l_recv },
+        { NULL, NULL }
+    };
+
+    luaL_newmetatable( l, INITIATOR_ID );
+    luaL_setfuncs( l, regs, 0 );
+    lua_pushvalue( l, -1 );
+    lua_setfield( l, -1, "__index" );
+    lua_setglobal( l, "fix" );
+}
+
+int main( int argc, char** argv )
+{
+    io_thread io;
+
+    lua_State* l = luaL_newstate();
+    luaL_openlibs( l );
+    l_register( l );
+
+    int err = luaL_dofile( l, argv[1] );
+    if( err ) {
+        std::cout << "Lua error: " << luaL_checkstring( l, -1 ) << std::endl;
+    }
+
+    lua_close( l );
+
+    io.join();
+}
