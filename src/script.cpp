@@ -181,7 +181,7 @@ int l_sleep( lua_State* L )
     if( lua_gettop( L ) == 1 )
     {
         luaL_checktype( L, -1, LUA_TNUMBER );
-        sleep( lua_tointeger( L, -1 ) );
+        core::sleep_ms( lua_tointeger( L, -1 ) * 1000 );
     }
 
     return 0;
