@@ -1,4 +1,3 @@
-
 extern "C"
 {
 #include <lua.h>
@@ -12,20 +11,22 @@ extern "C"
 #include "hulk/fix/tcp.h"
 
 #include <list>
+#include <ctime>
 
 using namespace hulk;
 
 const char* INITIATOR_ID = "luaL_initiator";
 
-core::log& l = core::logger::instance().get( "hulk.script" );
+core::log& log = core::logger::instance().get( "hulk.script" );
 
 fix::tcp_event_loop io_loop;
 
-void print_fields( const fix::fields& f )
+void print_fix( const fix::fields& f )
 {
     for( int i=0; i<f.size(); i++ ) {
         std::cout << f[i]._tag << " = " << f[i]._value << std::endl;
     }
+    std::cout << std::endl;
 }
 
 class io_thread : public core::thread
@@ -98,8 +99,15 @@ int l_new_initiator( lua_State* l )
     const char* protocol = luaL_checkstring( l, -2 );
     fix::fields header; pop_fix( l, header );
 
+    std::string uri( &transport_uri[6] );
+    size_t s = uri.find( ':' );
+    std::string host = uri.substr( 0, s );
+    std::string port = uri.substr( s+1 );
+
+    LOG_INFO( log, "connecting to " << host << ":" << port );
+
     scriptable_initiator** udata = (scriptable_initiator**)lua_newuserdata( l, sizeof( scriptable_initiator* ) );
-    *udata = io_loop.new_initiator< scriptable_initiator >( "192.168.1.73", 9880, protocol, header );
+    *udata = io_loop.new_initiator< scriptable_initiator >( host.c_str(), atoi( port.c_str() ), protocol, header );
     luaL_getmetatable( l, INITIATOR_ID );
     lua_setmetatable( l, -2 );
 
@@ -134,28 +142,67 @@ int l_recv( lua_State* l )
         core::sleep_ms( 50 ); ++i;
     }
 
-    if( i < 100 ) {
+    if( i < 100 )
+    {
+        //LOG_INFO( log, "recvd: " << msg.size() << " fields" );
+        //print_fix( msg );
         push_fix( l, msg );
-    } else {
+    }
+    else
+    {
         lua_pushnil( l );
     }
 
     return 1;
 }
 
+int l_print( lua_State* l )
+{
+    fix::fields msg; pop_fix( l, msg );
+    print_fix( msg );
+    return 0;
+}
+
+int l_uuid( lua_State* l )
+{
+    static size_t suffix = 0;
+    static time_t prefix;
+    time( &prefix );
+
+    char id[16];
+    sprintf( id, "%05d-%08d", (int)prefix%86400, (int)suffix++ );
+    lua_pushstring( l, id );
+
+    return 1;
+}
+
+int l_sleep( lua_State* L )
+{
+    if( lua_gettop( L ) == 1 )
+    {
+        luaL_checktype( L, -1, LUA_TNUMBER );
+        sleep( lua_tointeger( L, -1 ) );
+    }
+
+    return 0;
+}
+
 void l_register( lua_State* l )
 {
-    luaL_Reg regs[] =
+    luaL_Reg reg_fix[] =
     {
         { "new_initiator", l_new_initiator },
         { "__gc", l_del_initiator },
         { "send", l_send },
         { "recv", l_recv },
+        { "uuid", l_uuid },
+        { "print", l_print },
+        { "sleep", l_sleep },
         { NULL, NULL }
     };
 
     luaL_newmetatable( l, INITIATOR_ID );
-    luaL_setfuncs( l, regs, 0 );
+    luaL_setfuncs( l, reg_fix, 0 );
     lua_pushvalue( l, -1 );
     lua_setfield( l, -1, "__index" );
     lua_setglobal( l, "fix" );
@@ -169,9 +216,11 @@ int main( int argc, char** argv )
     luaL_openlibs( l );
     l_register( l );
 
+    LOG_INFO( log, "running script: " << argv[1] );
+
     int err = luaL_dofile( l, argv[1] );
     if( err ) {
-        std::cout << "Lua error: " << luaL_checkstring( l, -1 ) << std::endl;
+        LOG_ERROR( log, "lua error: " << luaL_checkstring( l, -1 ) );
     }
 
     lua_close( l );
