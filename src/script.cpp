@@ -1,3 +1,4 @@
+
 extern "C"
 {
 #include <lua.h>
@@ -21,6 +22,12 @@ core::log& log = core::logger::instance().get( "hulk.script" );
 
 fix::tcp_event_loop io_loop;
 
+void fatal_error( const std::string& err )
+{
+    LOG_ERROR( log, err );
+    exit( 1 );
+}
+
 void print_fix( const fix::fields& f )
 {
     for( int i=0; i<f.size(); i++ ) {
@@ -42,10 +49,13 @@ public:
     scriptable_initiator( const fix::value& protocol, const fix::fields& header, fix::transport& tpt )
     : session( protocol, header, tpt ) {}
 
-    virtual void recv( const fix::fields& msg )
+    virtual void recv( const fix::fields& msg, const std::string buf )
     {
         core::lock_guard guard( _mutex );
-        _messages.push_back( msg );
+        message_data data;
+        data._fields = msg;
+        data._buf = buf;
+        _messages.push_back( data );
     }
 
     bool recvd( fix::fields& msg )
@@ -53,7 +63,8 @@ public:
         core::lock_guard guard( _mutex );
         if( _messages.size() )
         {
-            msg = *_messages.begin();
+            LOG_INFO( log, "recvd - " << (*_messages.begin())._buf );
+            msg = (*_messages.begin())._fields;
             _messages.pop_front();
             return true;
         }
@@ -62,8 +73,14 @@ public:
     }
 
 private:
+    struct message_data
+    {
+        fix::fields _fields;
+        std::string _buf;
+    };
+
     core::mutex _mutex;
-    std::list< fix::fields > _messages;
+    std::list< message_data > _messages;
 };
 
 void push_fix( lua_State* l, fix::fields& flds )
@@ -142,15 +159,63 @@ int l_recv( lua_State* l )
         core::sleep_ms( 50 ); ++i;
     }
 
+    if( i < 100 ) {
+        push_fix( l, msg );
+    } else {
+        lua_pushnil( l );
+    }
+
+    return 1;
+}
+
+int l_expect( lua_State* l )
+{
+    scriptable_initiator* si = l_check_initiator( l, -2 );
+    fix::fields check_flds;
+    pop_fix( l, check_flds );
+
+    int i=0;
+    fix::fields recvd_flds;
+    while( !si->recvd( recvd_flds ) && i < 100 ) {
+        core::sleep_ms( 50 ); ++i;
+    }
+
     if( i < 100 )
     {
-        //LOG_INFO( log, "recvd: " << msg.size() << " fields" );
-        //print_fix( msg );
-        push_fix( l, msg );
+        fix::field_map recvd_map( recvd_flds );
+
+        for( int i=0; i<check_flds.size(); i++ )
+        {
+            fix::tag tag = check_flds[i]._tag;
+            fix::value& val = check_flds[i]._value;
+
+            LOG_INFO( log, "expect: " << tag << "=" << val );
+
+            if( recvd_map.count( tag ) )
+            {
+                const fix::value* fld = recvd_map[tag];
+                if( val != *fld )
+                {
+                    std::stringstream ss;
+                    ss << "l_expect: value mismatch: " << val << "!=" << *fld;
+                    fatal_error( ss.str() );
+                }
+            }
+            else
+            {
+                std::stringstream ss;
+                ss << "l_expect: no such field - " << tag;
+                fatal_error( ss.str() );
+            }
+
+            lua_pop( l, 1 );
+
+            push_fix( l, recvd_flds );
+        }
     }
     else
     {
-        lua_pushnil( l );
+        fatal_error( "l_expect: timed out" );
     }
 
     return 1;
@@ -181,7 +246,7 @@ int l_sleep( lua_State* L )
     if( lua_gettop( L ) == 1 )
     {
         luaL_checktype( L, -1, LUA_TNUMBER );
-        core::sleep_ms( lua_tointeger( L, -1 ) * 1000 );
+        core::sleep_ms( 1000 * lua_tointeger( L, -1 ) );
     }
 
     return 0;
@@ -195,6 +260,7 @@ void l_register( lua_State* l )
         { "__gc", l_del_initiator },
         { "send", l_send },
         { "recv", l_recv },
+        { "expect", l_expect },
         { "uuid", l_uuid },
         { "print", l_print },
         { "sleep", l_sleep },
