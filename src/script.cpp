@@ -22,9 +22,13 @@ core::log& log = core::logger::instance().get( "hulk.script" );
 
 fix::tcp_event_loop io_loop;
 
-void fatal_error( const std::string& err )
+void fatal_error( lua_State* l, const std::string& err )
 {
-    LOG_ERROR( log, err );
+    lua_Debug ar;
+    lua_getstack( l, 1, &ar );
+    lua_getinfo( l, "Slnt", &ar );
+
+    LOG_ERROR( log, err << " at " << ar.short_src << ":" << ar.currentline );
     exit( 1 );
 }
 
@@ -197,15 +201,15 @@ int l_expect( lua_State* l )
                 if( val != *fld )
                 {
                     std::stringstream ss;
-                    ss << "l_expect: value mismatch: " << val << "!=" << *fld;
-                    fatal_error( ss.str() );
+                    ss << "value mismatch: " << val << "!=" << *fld;
+                    fatal_error( l, ss.str() );
                 }
             }
             else
             {
                 std::stringstream ss;
-                ss << "l_expect: no such field - " << tag;
-                fatal_error( ss.str() );
+                ss << "no such field - " << tag;
+                fatal_error( l, ss.str() );
             }
 
             lua_pop( l, 1 );
@@ -215,7 +219,7 @@ int l_expect( lua_State* l )
     }
     else
     {
-        fatal_error( "l_expect: timed out" );
+        fatal_error( l, "timed out" );
     }
 
     return 1;
