@@ -22,24 +22,6 @@ core::log& log = core::logger::instance().get( "hulk.script" );
 
 fix::tcp_event_loop io_loop;
 
-void fatal_error( lua_State* l, const std::string& err )
-{
-    lua_Debug ar;
-    lua_getstack( l, 1, &ar );
-    lua_getinfo( l, "Slnt", &ar );
-
-    LOG_ERROR( log, err << " at " << ar.short_src << ":" << ar.currentline );
-    exit( 1 );
-}
-
-void print_fix( const fix::fields& f )
-{
-    for( int i=0; i<f.size(); i++ ) {
-        std::cout << f[i]._tag << " = " << f[i]._value << std::endl;
-    }
-    std::cout << std::endl;
-}
-
 class io_thread : public core::thread
 {
     virtual void run() {
@@ -67,9 +49,18 @@ public:
         core::lock_guard guard( _mutex );
         if( _messages.size() )
         {
-            LOG_INFO( log, "recvd - " << (*_messages.begin())._buf );
-            msg = (*_messages.begin())._fields;
+            message_data& md = *_messages.begin();
+
+            std::stringstream ss;
+            for( int i=0; i< md._fields.size(); i++ ) {
+                ss << "\n    " << md._fields[i]._tag << " = " << md._fields[i]._value;
+            }
+
+            LOG_INFO( log, "recvd " << md._fields.size() << " fields" << ss.str() );
+
+            msg = md._fields;
             _messages.pop_front();
+
             return true;
         }
 
@@ -87,6 +78,14 @@ private:
     std::list< message_data > _messages;
 };
 
+struct decoder_cb
+{
+    fix::fields _msg;
+    void operator()( const fix::fields& msg, const std::string buf ) {
+        _msg = msg;
+    }
+};
+
 void push_fix( lua_State* l, fix::fields& flds )
 {
     lua_newtable( l );
@@ -99,6 +98,14 @@ void push_fix( lua_State* l, fix::fields& flds )
     }
 }
 
+void push_fix( lua_State* l, const std::string& flds )
+{
+    decoder_cb cb;
+    fix::decoder d;
+    d.decode( cb, flds.c_str(), flds.size() );
+    push_fix( l, cb._msg );
+}
+
 void pop_fix( lua_State* l, fix::fields& flds )
 {
     lua_pushnil( l );
@@ -107,6 +114,16 @@ void pop_fix( lua_State* l, fix::fields& flds )
         flds.push_back( fix::field( lua_tointeger( l, -2 ), lua_tostring( l, -1 ) ) );
         lua_pop( l, 1 );
     }
+}
+
+void fatal_error( lua_State* l, const std::string& err )
+{
+    lua_Debug ar;
+    lua_getstack( l, 1, &ar );
+    lua_getinfo( l, "Slnt", &ar );
+
+    LOG_ERROR( log, err << " at " << ar.short_src << ":" << ar.currentline );
+    exit( 1 );
 }
 
 scriptable_initiator* l_check_initiator( lua_State* l, int n )
@@ -148,9 +165,12 @@ int l_send( lua_State* l )
     scriptable_initiator* si = l_check_initiator( l, -3 );
     const char* msg_type = luaL_checkstring( l, -2 );
     fix::fields body; pop_fix( l, body );
-    si->send( msg_type, body );
 
-    return 0;
+    std::string s;
+    si->send( msg_type, body, &s );
+    push_fix( l, s );
+
+    return 1;
 }
 
 int l_recv( lua_State* l )
@@ -158,12 +178,14 @@ int l_recv( lua_State* l )
     scriptable_initiator* si = l_check_initiator( l, -1 );
     fix::fields msg;
 
+    LOG_INFO( log, "recv..." );
+
     int i=0;
-    while( !si->recvd( msg ) && i < 100 ) {
+    while( !si->recvd( msg ) && i < 200 ) {
         core::sleep_ms( 50 ); ++i;
     }
 
-    if( i < 100 ) {
+    if( i < 200 ) {
         push_fix( l, msg );
     } else {
         lua_pushnil( l );
@@ -178,13 +200,15 @@ int l_expect( lua_State* l )
     fix::fields check_flds;
     pop_fix( l, check_flds );
 
+    LOG_INFO( log, "expecting " << check_flds.size() << " fields..." );
+
     int i=0;
     fix::fields recvd_flds;
-    while( !si->recvd( recvd_flds ) && i < 100 ) {
+    while( !si->recvd( recvd_flds ) && i < 200 ) {
         core::sleep_ms( 50 ); ++i;
     }
 
-    if( i < 100 )
+    if( i < 200 )
     {
         fix::field_map recvd_map( recvd_flds );
 
@@ -225,13 +249,6 @@ int l_expect( lua_State* l )
     return 1;
 }
 
-int l_print( lua_State* l )
-{
-    fix::fields msg; pop_fix( l, msg );
-    print_fix( msg );
-    return 0;
-}
-
 int l_uuid( lua_State* l )
 {
     static size_t suffix = 0;
@@ -256,6 +273,21 @@ int l_sleep( lua_State* L )
     return 0;
 }
 
+int l_script_error( lua_State* l )
+{
+    const char* errmsg = luaL_checkstring( l, -1 );
+
+    lua_Debug ar;
+    lua_getstack( l, 1, &ar );
+    lua_getinfo( l, "Slnt", &ar );
+
+    std::cerr << std::endl << errmsg << " at " << ar.short_src << ":" << ar.currentline << std::endl;
+    std::cerr << "exiting...\n\n";
+    exit( 1 );
+
+    return 0;
+}
+
 void l_register( lua_State* l )
 {
     luaL_Reg reg_fix[] =
@@ -266,7 +298,6 @@ void l_register( lua_State* l )
         { "recv", l_recv },
         { "expect", l_expect },
         { "uuid", l_uuid },
-        { "print", l_print },
         { "sleep", l_sleep },
         { NULL, NULL }
     };
@@ -276,6 +307,17 @@ void l_register( lua_State* l )
     lua_pushvalue( l, -1 );
     lua_setfield( l, -1, "__index" );
     lua_setglobal( l, "fix" );
+
+    luaL_Reg reg_script[] =
+    {
+        { "error", l_script_error },
+        { NULL, NULL }
+    };
+
+    lua_newtable( l ); 
+    lua_setglobal( l, "script" ); 
+    lua_getglobal( l, "script" ); 
+    luaL_setfuncs( l, reg_script, 0 );
 }
 
 int main( int argc, char** argv )
@@ -297,3 +339,4 @@ int main( int argc, char** argv )
 
     io.join();
 }
+
