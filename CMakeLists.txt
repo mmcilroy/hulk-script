@@ -1,5 +1,5 @@
 cmake_minimum_required( VERSION 2.8 )
-project( hulk-script )
+project( hulk_script )
 
 include_directories( include )
 include_directories( ~/hulk-core/include )
