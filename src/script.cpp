@@ -18,11 +18,11 @@ using namespace hulk;
 
 const char* INITIATOR_ID = "luaL_initiator";
 
-core::log& log = core::logger::instance().get( "hulk.script" );
+log& lg = logger::instance().get( "hulk.script" );
 
 fix::tcp_event_loop io_loop;
 
-class io_thread : public core::thread
+class io_thread : public thread
 {
     virtual void run() {
         while( 1 ) io_loop.loop( 1000 );
@@ -37,7 +37,7 @@ public:
 
     virtual void recv( const fix::fields& msg, const std::string buf )
     {
-        core::lock_guard guard( _mutex );
+        lock_guard guard( _mutex );
         message_data data;
         data._fields = msg;
         data._buf = buf;
@@ -45,8 +45,8 @@ public:
     }
 
     bool recvd( fix::fields& msg )
-    {
-        core::lock_guard guard( _mutex );
+    {   
+        lock_guard guard( _mutex );
         if( _messages.size() )
         {
             message_data& md = *_messages.begin();
@@ -56,7 +56,7 @@ public:
                 ss << "\n    " << md._fields[i]._tag << " = " << md._fields[i]._value;
             }
 
-            LOG_INFO( log, "recvd " << md._fields.size() << " fields" << ss.str() );
+            LOG_INFO( lg, "recvd " << md._fields.size() << " fields" << ss.str() );
 
             msg = md._fields;
             _messages.pop_front();
@@ -74,7 +74,7 @@ private:
         std::string _buf;
     };
 
-    core::mutex _mutex;
+    mutex _mutex;
     std::list< message_data > _messages;
 };
 
@@ -122,7 +122,7 @@ void fatal_error( lua_State* l, const std::string& err )
     lua_getstack( l, 1, &ar );
     lua_getinfo( l, "Slnt", &ar );
 
-    LOG_ERROR( log, err << " at " << ar.short_src << ":" << ar.currentline );
+    LOG_ERROR( lg, err << " at " << ar.short_src << ":" << ar.currentline );
     exit( 1 );
 }
 
@@ -142,7 +142,7 @@ int l_new_initiator( lua_State* l )
     std::string host = uri.substr( 0, s );
     std::string port = uri.substr( s+1 );
 
-    LOG_INFO( log, "connecting to " << host << ":" << port );
+    LOG_INFO( lg, "connecting to " << host << ":" << port );
 
     scriptable_initiator** udata = (scriptable_initiator**)lua_newuserdata( l, sizeof( scriptable_initiator* ) );
     *udata = io_loop.new_initiator< scriptable_initiator >( host.c_str(), atoi( port.c_str() ), protocol, header );
@@ -178,11 +178,11 @@ int l_recv( lua_State* l )
     scriptable_initiator* si = l_check_initiator( l, -1 );
     fix::fields msg;
 
-    LOG_INFO( log, "recv..." );
+    LOG_INFO( lg, "recv..." );
 
     int i=0;
     while( !si->recvd( msg ) && i < 200 ) {
-        core::sleep_ms( 50 ); ++i;
+        sleep_ms( 50 ); ++i;
     }
 
     if( i < 200 ) {
@@ -200,12 +200,12 @@ int l_expect( lua_State* l )
     fix::fields check_flds;
     pop_fix( l, check_flds );
 
-    LOG_INFO( log, "expecting " << check_flds.size() << " fields..." );
+    LOG_INFO( lg, "expecting " << check_flds.size() << " fields..." );
 
     int i=0;
     fix::fields recvd_flds;
     while( !si->recvd( recvd_flds ) && i < 200 ) {
-        core::sleep_ms( 50 ); ++i;
+        sleep_ms( 50 ); ++i;
     }
 
     if( i < 200 )
@@ -217,7 +217,7 @@ int l_expect( lua_State* l )
             fix::tag tag = check_flds[i]._tag;
             fix::value& val = check_flds[i]._value;
 
-            LOG_INFO( log, "expect: " << tag << "=" << val );
+            LOG_INFO( lg, "expect: " << tag << "=" << val );
 
             if( recvd_map.count( tag ) )
             {
@@ -267,7 +267,7 @@ int l_sleep( lua_State* L )
     if( lua_gettop( L ) == 1 )
     {
         luaL_checktype( L, -1, LUA_TNUMBER );
-        core::sleep_ms( 1000 * lua_tointeger( L, -1 ) );
+        sleep_ms( 1000 * lua_tointeger( L, -1 ) );
     }
 
     return 0;
@@ -328,11 +328,11 @@ int main( int argc, char** argv )
     luaL_openlibs( l );
     l_register( l );
 
-    LOG_INFO( log, "running script: " << argv[1] );
+    LOG_INFO( lg, "running script: " << argv[1] );
 
     int err = luaL_dofile( l, argv[1] );
     if( err ) {
-        LOG_ERROR( log, "lua error: " << luaL_checkstring( l, -1 ) );
+        LOG_ERROR( lg, "lua error: " << luaL_checkstring( l, -1 ) );
     }
 
     lua_close( l );
