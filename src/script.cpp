@@ -24,7 +24,8 @@ fix::tcp_event_loop io_loop;
 
 class io_thread : public thread
 {
-    virtual void run() {
+    virtual void run()
+    {
         while( 1 ) io_loop.loop( 1000 );
     }
 };
@@ -33,7 +34,9 @@ class scriptable_initiator : public fix::session
 {
 public:
     scriptable_initiator( const fix::value& protocol, const fix::fields& header, fix::transport& tpt )
-    : session( protocol, header, tpt ) {}
+    : session( protocol, header, tpt )
+    {
+    }
 
     virtual void recv( const fix::fields& msg, const std::string buf )
     {
@@ -323,6 +326,7 @@ void l_register( lua_State* l )
 int main( int argc, char** argv )
 {
     io_thread io;
+    io.start();
 
     lua_State* l = luaL_newstate();
     luaL_openlibs( l );
@@ -339,4 +343,3 @@ int main( int argc, char** argv )
 
     io.join();
 }
-
