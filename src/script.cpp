@@ -9,6 +9,8 @@ extern "C"
 #include "hulk/core/tcp.h"
 #include "hulk/core/thread.h"
 #include "hulk/core/logger.h"
+#include "hulk/fix/decoder.h"
+#include "hulk/fix/session.h"
 #include "hulk/fix/tcp.h"
 
 #include <list>
@@ -33,12 +35,12 @@ class io_thread : public thread
 class scriptable_initiator : public fix::session
 {
 public:
-    scriptable_initiator( const fix::value& protocol, const fix::fields& header, fix::transport& tpt )
-    : session( protocol, header, tpt )
+    scriptable_initiator( const fix::value& protocol, const fix::fields& header )
+    : session( protocol, header )
     {
     }
 
-    virtual void recv( const fix::fields& msg, const std::string buf )
+    virtual void on_recv( const fix::fields& msg, const std::string buf )
     {
         lock_guard guard( _mutex );
         message_data data;
@@ -147,8 +149,10 @@ int l_new_initiator( lua_State* l )
 
     LOG_INFO( lg, "connecting to " << host << ":" << port );
 
+    shared_ptr< fix::session > session( new scriptable_initiator( protocol, header ) );
     scriptable_initiator** udata = (scriptable_initiator**)lua_newuserdata( l, sizeof( scriptable_initiator* ) );
-    *udata = io_loop.new_initiator< scriptable_initiator >( host.c_str(), atoi( port.c_str() ), protocol, header );
+    *udata = (scriptable_initiator*)session.get();
+    io_loop.new_initiator( host.c_str(), atoi( port.c_str() ), session );
     luaL_getmetatable( l, INITIATOR_ID );
     lua_setmetatable( l, -2 );
 
@@ -208,7 +212,7 @@ int l_expect( lua_State* l )
     int i=0;
     fix::fields recvd_flds;
     while( !si->recvd( recvd_flds ) && i < 200 ) {
-        sleep_ms( 50 ); ++i;
+        thread::sleep( 50 ); ++i;
     }
 
     if( i < 200 )
